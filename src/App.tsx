@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import {
   ActionIcon,
+  Alert,
   AppShell,
   AppShellHeader,
   AppShellMain,
@@ -21,6 +22,7 @@ import {
   Select,
   SimpleGrid,
   Stack,
+  Switch,
   Table,
   Tabs,
   Text,
@@ -32,9 +34,13 @@ import {
 import {
   IconAlertTriangle,
   IconAnchor,
+  IconArrowDown,
+  IconArrowUp,
   IconBoxMultiple,
   IconCheck,
+  IconClock,
   IconCube,
+  IconDroplet,
   IconFileDescription,
   IconHistory,
   IconLayoutBoardSplit,
@@ -42,14 +48,39 @@ import {
   IconMap2,
   IconPlayerPlay,
   IconPrinter,
+  IconReceipt,
   IconRefresh,
   IconRulerMeasure,
   IconRoute,
+  IconSend,
   IconShip,
   IconUsers
 } from '@tabler/icons-react';
 import * as THREE from 'three';
 import { useGetVoyageQuery, type Cargo, type CargoType } from './api';
+import {
+  PORTS,
+  advanceClock,
+  backfillBallast,
+  ballastMissing,
+  ballastTotal,
+  cargoAboardAt,
+  clearanceGate,
+  estimateDraft,
+  fmtTime,
+  gateReasons,
+  issuePermit,
+  moveDischarge,
+  movePortOrder,
+  requestWindow,
+  resolvePermit,
+  retryReconcile,
+  setBallastLevel,
+  simulateContention,
+  toggleFailNext,
+  type PermitView,
+  type PortId
+} from './clearance';
 import {
   acceptComment,
   acceptLimit,
@@ -69,6 +100,7 @@ import {
 const nav = [
   { path: '/', label: '航次总览', icon: <IconShip size={17} /> },
   { path: '/stowage', label: '配载与货位', icon: <IconLayoutBoardSplit size={17} /> },
+  { path: '/clearance', label: '靠港许可', icon: <IconFileDescription size={17} /> },
   { path: '/compare', label: '方案对比', icon: <IconHistory size={17} /> },
   { path: '/print', label: '配载图与清单', icon: <IconPrinter size={17} /> }
 ];
@@ -217,15 +249,136 @@ function SectionView() {
   return <div className="section-view"><div className="section-labels"><span>第 3 层</span><span>第 2 层</span><span>第 1 层</span><span>舱底</span></div><div className="section-grid">{Array.from({ length: 9 * 4 }).map((_, index) => { const tier = 4 - Math.floor(index / 9); const row = index % 9; const item = cargo.find((cargoItem) => cargoItem.tier === tier && cargoItem.row === row); return <button key={index} className={item ? 'occupied' : ''} style={item ? { background: item.color } : undefined} onClick={() => item && dispatch(selectCargo(item.id))} title={item ? `${item.id} · ${item.weight}t` : `空货位 R${row} T${tier}`}>{item?.bill.slice(-3)}</button>; })}</div><div className="section-axis">舱内横向剖面 · 鼠标悬停查看重量</div></div>;
 }
 
+const permitStatusColor: Record<PermitView['code'], string> = { 有效: 'teal', 已失效: 'orange', 已过期: 'red', 待补录: 'grape', 未签发: 'gray' };
+
+function GateBanner() {
+  const cargo = useSelector((root: RootState) => root.stowage.cargo);
+  const clearance = useSelector((root: RootState) => root.clearance);
+  const gate = clearanceGate(clearance, cargo);
+  if (gate.open) return null;
+  return <div className="warning-banner"><IconAlertTriangle size={18} /><strong>靠港许可未就绪，锁定与打印入口已拦截</strong><span>{gateReasons(clearance, cargo).join('；')}</span></div>;
+}
+
+function Clearance() {
+  const clearance = useSelector((root: RootState) => root.clearance);
+  const cargo = useSelector((root: RootState) => root.stowage.cargo);
+  const dispatch = useDispatch();
+  const missing = ballastMissing(clearance);
+  const ballastTonnes = ballastTotal(clearance);
+  const gate = clearanceGate(clearance, cargo);
+  const [backfill, setBackfill] = useState<Record<string, number>>({});
+  const nextPortId = clearance.portOrder[0];
+  const draftOf = (portId: PortId) => (missing.length ? null : estimateDraft(cargoAboardAt(cargo, clearance, portId), ballastTonnes));
+  const requestOf = (portId: PortId) => clearance.requests.find((item) => item.portId === portId);
+  const nextDraft = draftOf(nextPortId);
+  const nextView = resolvePermit(clearance, cargo, nextPortId);
+  const nextWindowId = requestOf(nextPortId)?.windowId ?? clearance.permits[nextPortId]?.windowId;
+  const nextWindow = clearance.windows.find((item) => item.id === nextWindowId);
+  const pending = clearance.reconcile.pending;
+  return <div className="page">
+    <PageHeading eyebrow={`PORT CLEARANCE / 对账版本 V${clearance.version}`} title="靠港许可与潮窗对账" description={`航次计划、货票、压载水舱与码头潮窗合成同一份许可 · 当前时间 ${fmtTime(clearance.clock)}`} actions={<><Button variant="default" leftSection={<IconClock size={16} />} onClick={() => dispatch(advanceClock(6))}>模拟时间 +6h</Button><Button variant="default" leftSection={<IconSend size={16} />} onClick={() => dispatch(simulateContention({ windowId: 'TW-2', cargo }))}>模拟两码头并发提交 TW-2</Button></>} />
+    {!gate.open && <div className="warning-banner"><IconAlertTriangle size={18} /><strong>许可未就绪，锁定与打印入口已拦截</strong><span>{gateReasons(clearance, cargo).join('；')}</span></div>}
+    <Card padding="md" mb="sm" className="next-port-card">
+      <div className="panel-title" style={{ borderBottom: 0, minHeight: 0, padding: 0, marginBottom: 10 }}><div><strong>下一港许可 · {PORTS[nextPortId].name}</strong><Text size="xs" c="dimmed">{PORTS[nextPortId].terminal} · ETA {fmtTime(PORTS[nextPortId].eta)} · 按下一港在船货票与压载水实时计算预计吃水</Text></div><Badge size="lg" color={permitStatusColor[nextView.code]}>{nextView.code}</Badge></div>
+      <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="xs">
+        <div className="mini-stat"><span>预计平均吃水</span><strong>{nextDraft ? `${nextDraft.mean.toFixed(2)} m` : '待补录'}</strong></div>
+        <div className="mini-stat"><span>艏 / 艉吃水</span><strong>{nextDraft ? `${nextDraft.bow.toFixed(2)} / ${nextDraft.stern.toFixed(2)} m` : '—'}</strong></div>
+        <div className="mini-stat"><span>许可所需最大吃水</span><strong>{nextDraft ? `${nextDraft.max.toFixed(2)} m` : '—'}</strong></div>
+        <div className="mini-stat"><span>潮窗限制</span><strong>{nextWindow ? `${nextWindow.id} · ${nextWindow.maxDraft} m` : '未选潮窗'}</strong></div>
+      </SimpleGrid>
+    </Card>
+    <div className="clearance-grid">
+      <Stack gap="sm">
+        <Card padding={0}>
+          <div className="panel-title"><div><strong>航次计划与许可</strong><Text size="xs" c="dimmed">货位、压载水量或卸货顺序变化时，受影响港口许可立即失效重算，其他港沿用</Text></div><IconAnchor size={18} /></div>
+          <Table verticalSpacing="sm">
+            <Table.Thead><Table.Tr><Table.Th>顺序</Table.Th><Table.Th>港口 / 码头</Table.Th><Table.Th>预计吃水</Table.Th><Table.Th>潮窗</Table.Th><Table.Th>许可</Table.Th><Table.Th>批次</Table.Th><Table.Th>操作</Table.Th></Table.Tr></Table.Thead>
+            <Table.Tbody>{clearance.portOrder.map((portId, index) => {
+              const view = resolvePermit(clearance, cargo, portId);
+              const draft = draftOf(portId);
+              const request = requestOf(portId);
+              const permit = clearance.permits[portId];
+              const windowOptions = clearance.windows.filter((item) => item.ports.includes(portId)).map((item) => ({ value: item.id, label: `${item.id} ${fmtTime(item.start)} · 限制 ${item.maxDraft}m${item.occupiedBy && item.occupiedBy !== portId ? ' · 已占用' : ''}`, disabled: Boolean(item.occupiedBy && item.occupiedBy !== portId) }));
+              return <Table.Tr key={portId}>
+                <Table.Td><Group gap={2} wrap="nowrap"><Text size="xs" fw={700}>#{index + 1}</Text><ActionIcon size="sm" variant="subtle" disabled={index === 0} onClick={() => dispatch(movePortOrder({ portId, direction: -1 }))}><IconArrowUp size={13} /></ActionIcon><ActionIcon size="sm" variant="subtle" disabled={index === clearance.portOrder.length - 1} onClick={() => dispatch(movePortOrder({ portId, direction: 1 }))}><IconArrowDown size={13} /></ActionIcon></Group></Table.Td>
+                <Table.Td><Text size="sm" fw={700}>{PORTS[portId].name}</Text><Text size="xs" c="dimmed">{PORTS[portId].terminal} · ETA {fmtTime(PORTS[portId].eta)}</Text></Table.Td>
+                <Table.Td>{draft ? <Text size="xs">最大 {draft.max.toFixed(2)}m<br /><Text span c="dimmed">均 {draft.mean.toFixed(2)}m · 在船 {draft.weight.toFixed(0)}t</Text></Text> : <Badge color="grape" variant="light">待补录压载</Badge>}</Table.Td>
+                <Table.Td><Select size="xs" placeholder="选择潮窗" data={windowOptions} value={request?.windowId ?? permit?.windowId ?? null} onChange={(value) => value && dispatch(requestWindow({ portId, windowId: value, cargo }))} /></Table.Td>
+                <Table.Td><Badge color={permitStatusColor[view.code]}>{view.code}</Badge>{view.code === '已失效' && <Text size="xs" c="dimmed" mt={4}>吃水与潮窗结论已按最新方案重算，需重新签发</Text>}</Table.Td>
+                <Table.Td><Text size="xs">{permit?.batchNo ?? '—'}</Text></Table.Td>
+                <Table.Td><Button size="compact-xs" color="teal" disabled={missing.length > 0 || request?.status !== '已确认' || Boolean(pending)} onClick={() => dispatch(issuePermit({ portId, cargo }))}>{permit ? '重签许可' : '签发许可'}</Button></Table.Td>
+              </Table.Tr>;
+            })}</Table.Tbody>
+          </Table>
+        </Card>
+        <Card padding="md">
+          <div className="panel-title" style={{ borderBottom: 0, minHeight: 0, padding: 0, marginBottom: 10 }}><div><strong>卸货顺序</strong><Text size="xs" c="dimmed">调整顺序只影响对应港口的许可指纹</Text></div><IconRoute size={18} /></div>
+          <div className="discharge-grid">{clearance.portOrder.map((portId) => <div key={portId}>
+            <Text size="xs" fw={700} mb={6}>{PORTS[portId].name}</Text>
+            {clearance.dischargeOrder[portId].map((cargoId, orderIndex) => {
+              const item = cargo.find((entry) => entry.id === cargoId);
+              return <div className="order-row" key={cargoId}><Group gap={6} wrap="nowrap"><Text size="xs" c="dimmed">{orderIndex + 1}.</Text><Text size="xs">{item?.bill ?? cargoId} · {item?.weight ?? 0}t</Text></Group><Group gap={2} wrap="nowrap"><ActionIcon size="sm" variant="subtle" disabled={orderIndex === 0} onClick={() => dispatch(moveDischarge({ portId, cargoId, direction: -1 }))}><IconArrowUp size={12} /></ActionIcon><ActionIcon size="sm" variant="subtle" disabled={orderIndex === clearance.dischargeOrder[portId].length - 1} onClick={() => dispatch(moveDischarge({ portId, cargoId, direction: 1 }))}><IconArrowDown size={12} /></ActionIcon></Group></div>;
+            })}
+          </div>)}</div>
+        </Card>
+        <Card padding="md">
+          <div className="panel-title" style={{ borderBottom: 0, minHeight: 0, padding: 0, marginBottom: 10 }}><div><strong>对账批次</strong><Text size="xs" c="dimmed">窗口占用与许可记录同批次原子写入，失败按原批次号重试</Text></div><IconReceipt size={18} /></div>
+          <Switch size="sm" label="模拟下一次对账写入失败" checked={clearance.reconcile.failNext} onChange={() => dispatch(toggleFailNext())} />
+          {pending && <Alert color="red" mt="sm" title={`批次 ${pending.batchNo} · 第 ${pending.attempts} 次写入失败`}>
+            <Text size="xs">{pending.lastError}</Text>
+            <Button size="compact-xs" color="red" mt="xs" onClick={() => dispatch(retryReconcile({ cargo }))}>从最后完成版本按原批次号重试</Button>
+          </Alert>}
+          {[...clearance.reconcile.committed].reverse().map((batch) => <div className="batch-row" key={batch.batchNo}><div><strong>{batch.batchNo} · 版本 V{batch.version}</strong><span>{fmtTime(batch.committedAt)} · {batch.entries.join('、')}</span></div><Badge size="xs" color="teal">已入账</Badge></div>)}
+        </Card>
+      </Stack>
+      <Stack gap="sm">
+        <Card padding="md" className={missing.length ? 'conflict-card' : ''}>
+          <div className="panel-title" style={{ borderBottom: 0, minHeight: 0, padding: 0, marginBottom: 10 }}><div><strong>压载水舱</strong><Text size="xs" c="dimmed">合计 {ballastTonnes.toFixed(0)} t · 调整水量将重算全部在航许可</Text></div><IconDroplet size={18} /></div>
+          {missing.length > 0 && <Text size="xs" c="red" mb="xs">旧草稿缺少 {missing.length} 个舱的压载记录，请先补录后才能签发许可。</Text>}
+          {clearance.ballast.map((tank) => <div className="tank-row" key={tank.id}>
+            <div><strong>{tank.name}</strong><span>{tank.id} · 舱容 {tank.capacity}t{tank.recordedAt ? ` · 记录于 ${fmtTime(tank.recordedAt)}` : ''}</span></div>
+            {tank.level === null
+              ? <Group gap={6} wrap="nowrap"><Badge size="xs" color="red">缺记录</Badge><NumberInput size="xs" w={90} placeholder="补录 t" min={0} max={tank.capacity} value={backfill[tank.id] ?? ''} onChange={(value) => setBackfill((prev) => ({ ...prev, [tank.id]: Number(value) || 0 }))} /></Group>
+              : <NumberInput size="xs" w={90} min={0} max={tank.capacity} value={tank.level} onChange={(value) => dispatch(setBallastLevel({ id: tank.id, level: Number(value) || 0 }))} />}
+          </div>)}
+          {missing.length > 0 && <Button size="xs" color="teal" mt="sm" disabled={!missing.every((tank) => backfill[tank.id] !== undefined)} onClick={() => { dispatch(backfillBallast({ levels: backfill })); setBackfill({}); }}>补录压载记录</Button>}
+        </Card>
+        <Card padding="md">
+          <div className="panel-title" style={{ borderBottom: 0, minHeight: 0, padding: 0, marginBottom: 10 }}><div><strong>潮窗池</strong><Text size="xs" c="dimmed">两个码头提交同一潮窗时先确认者占用</Text></div><IconClock size={18} /></div>
+          {clearance.windows.map((window) => <div className="window-row" key={window.id}>
+            <div><strong>{window.id} · {window.label}</strong><span>{fmtTime(window.start)} → {fmtTime(window.end)} · 限制吃水 {window.maxDraft}m · 适用 {window.ports.map((portId) => PORTS[portId].name).join(' / ')}</span></div>
+            <Badge size="xs" color={window.occupiedBy ? 'teal' : 'gray'}>{window.occupiedBy ? `${PORTS[window.occupiedBy].terminal} 占用` : '空闲'}</Badge>
+          </div>)}
+        </Card>
+        <Card padding="md">
+          <div className="panel-title" style={{ borderBottom: 0, minHeight: 0, padding: 0, marginBottom: 10 }}><div><strong>潮窗报文</strong><Text size="xs" c="dimmed">冲突报文保留并给出替代窗口</Text></div><IconSend size={18} /></div>
+          {clearance.requests.length === 0 && <Text size="xs" c="dimmed">暂无报文，请在航次计划中选择潮窗。</Text>}
+          {clearance.requests.map((request) => <div className="window-row" key={request.id}>
+            <div>
+              <strong>{request.terminal} → {request.windowId}</strong>
+              <span>{fmtTime(request.submittedAt)} · {request.note}</span>
+              {request.status === '冲突' && request.alternatives.length > 0 && <Group gap={6} mt={6} wrap="wrap"><Text size="xs" c="dimmed">替代窗口：</Text>{request.alternatives.map((alt) => <Button key={alt} size="compact-xs" variant="light" color="teal" onClick={() => dispatch(requestWindow({ portId: request.portId, windowId: alt, cargo }))}>改用 {alt}</Button>)}</Group>}
+            </div>
+            <Badge size="xs" color={request.status === '已确认' ? 'teal' : 'red'}>{request.status}</Badge>
+          </div>)}
+        </Card>
+      </Stack>
+    </div>
+  </div>;
+}
+
 function Overview() {
   const state = useSelector((root: RootState) => root.stowage);
+  const clearance = useSelector((root: RootState) => root.clearance);
   const { data } = useGetVoyageQuery();
   const dispatch = useDispatch();
   const stability = calculateStability(state.cargo);
   const conflicts = detectConflicts(state.cargo);
+  const gate = clearanceGate(clearance, state.cargo);
   const active = state.cargo.find((item) => item.id === state.activeCargoId) ?? state.cargo[0];
   return <div className="page">
-    <PageHeading eyebrow={`${data?.id ?? 'V-2609-17'} / 航次审阅`} title="多用途船舶配载校核" description={`${data?.vessel ?? '海岳轮'} · ${data?.route ?? '上海 → 釜山 → 温哥华'} · 计划离港 ${data?.departure ?? '10-02 14:00'}`} actions={<><Button variant="default" leftSection={<IconRefresh size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>{state.viewMode === '3d' ? '二维剖面' : '三维视角'}</Button><Button color="teal" leftSection={<IconLock size={16} />} disabled={conflicts.length > 0 || state.locked} onClick={() => dispatch(lockPlan())}>{state.locked ? '方案已锁定' : '锁定配载版本'}</Button></>} />
+    <PageHeading eyebrow={`${data?.id ?? 'V-2609-17'} / 航次审阅`} title="多用途船舶配载校核" description={`${data?.vessel ?? '海岳轮'} · ${data?.route ?? '上海 → 釜山 → 温哥华'} · 计划离港 ${data?.departure ?? '10-02 14:00'}`} actions={<><Button variant="default" leftSection={<IconRefresh size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>{state.viewMode === '3d' ? '二维剖面' : '三维视角'}</Button><Button color="teal" leftSection={<IconLock size={16} />} disabled={conflicts.length > 0 || state.locked || !gate.open} onClick={() => dispatch(lockPlan())}>{state.locked ? '方案已锁定' : gate.open ? '锁定配载版本' : '许可未就绪'}</Button></>} />
+    <GateBanner />
     {conflicts.length > 0 && <div className="warning-banner"><IconAlertTriangle size={18} /><strong>{conflicts.length} 项配载冲突待处理</strong><span>{conflicts.map((item) => item.title).join('、')}</span></div>}
     <SimpleGrid cols={{ base: 2, lg: 4 }} spacing="sm" mb="md">{[
       ['总货重', `${stability.total.toFixed(1)} t`, '设计上限 3560 t', 'ok'],
@@ -273,6 +426,8 @@ function Stowage() {
 
 function Compare() {
   const state = useSelector((root: RootState) => root.stowage);
+  const clearance = useSelector((root: RootState) => root.clearance);
+  const gate = clearanceGate(clearance, state.cargo);
   const stability = calculateStability(state.cargo);
   const changed = state.cargo.filter((item) => item.id === 'BL-88247' || item.id === 'BL-88219' || item.id === 'BL-88240');
   const [acceptOpen, setAcceptOpen] = useState(false);
@@ -286,17 +441,20 @@ function Compare() {
       ['BL-88219', '绑扎', '待绑扎', '需复核', '危险品隔离边界调整'],
       ['BL-88240', 'Tier', 'Tier 1', 'Tier 2', '降低舱内底层局部载荷']
     ].map((row) => <Table.Tr key={row[0]}><Table.Td>{row[0]}</Table.Td><Table.Td>{row[1]}</Table.Td><Table.Td><Text c="red" td="line-through">{row[2]}</Text></Table.Td><Table.Td><Text c="teal" fw={700}>{row[3]}</Text></Table.Td><Table.Td><Text size="xs">{row[4]}</Text></Table.Td><Table.Td><Checkbox label="接受" defaultChecked /></Table.Td></Table.Tr>)}</Table.Tbody></Table></Card>
-    <Modal opened={acceptOpen} onClose={() => setAcceptOpen(false)} title="形成配载审阅结论" centered><Stack><Text size="sm" c="dimmed">接受后生成新的只读版本并保留船长、码头和货主意见。锁定前仍可退回修改。</Text>{['重大件绑扎后由甲板部复核', '危险品隔离线在配载图中明确标注', '釜山卸货顺序不得改变'].map((limit) => <Checkbox key={limit} label={limit} checked={state.acceptedLimits.includes(limit)} onChange={() => dispatch(acceptLimit(limit))} />)}<Button color="teal" disabled={state.acceptedLimits.length < 3} onClick={() => { dispatch(lockPlan()); setAcceptOpen(false); }}>接受并锁定 V{state.planRevision + 1}</Button></Stack></Modal>
+    <Modal opened={acceptOpen} onClose={() => setAcceptOpen(false)} title="形成配载审阅结论" centered><Stack><Text size="sm" c="dimmed">接受后生成新的只读版本并保留船长、码头和货主意见。锁定前仍可退回修改。</Text>{['重大件绑扎后由甲板部复核', '危险品隔离线在配载图中明确标注', '釜山卸货顺序不得改变'].map((limit) => <Checkbox key={limit} label={limit} checked={state.acceptedLimits.includes(limit)} onChange={() => dispatch(acceptLimit(limit))} />)}<Button color="teal" disabled={state.acceptedLimits.length < 3 || !gate.open} onClick={() => { dispatch(lockPlan()); setAcceptOpen(false); }}>接受并锁定 V{state.planRevision + 1}</Button></Stack></Modal>
   </div>;
 }
 
 function PrintPlan() {
   const { data } = useGetVoyageQuery();
   const state = useSelector((root: RootState) => root.stowage);
+  const clearance = useSelector((root: RootState) => root.clearance);
+  const gate = clearanceGate(clearance, state.cargo);
   const stability = calculateStability(state.cargo);
   const dispatch = useDispatch();
   return <div className="page print-page">
-    <PageHeading eyebrow="STOWAGE PLAN / PRINT" title="配载图与卸货清单" description="面向船长、码头和理货人员打印，包含重量分布和危险品标记。" actions={<><Button variant="default" leftSection={<IconPlayerPlay size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>预览剖面</Button><Button color="teal" leftSection={<IconPrinter size={16} />} onClick={() => window.print()}>打印配载包</Button></>} />
+    <PageHeading eyebrow="STOWAGE PLAN / PRINT" title="配载图与卸货清单" description="面向船长、码头和理货人员打印，包含重量分布和危险品标记。" actions={<><Button variant="default" leftSection={<IconPlayerPlay size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>预览剖面</Button><Button color="teal" leftSection={<IconPrinter size={16} />} disabled={!gate.open} onClick={() => window.print()}>{gate.open ? '打印配载包' : '许可未就绪'}</Button></>} />
+    <GateBanner />
     <Card padding="xl" className="print-sheet">
       <div className="print-header"><div><Text size="xs" c="dimmed">VESSEL STOWAGE PLAN</Text><h1>{data?.vessel ?? '海岳轮'} · {data?.id ?? 'V-2609-17'}</h1><p>{data?.route}</p></div><div className="print-stamp">方案 V{state.planRevision}<br />已校核</div></div>
       <div className="print-kpis"><div><span>总货重</span><strong>{stability.total.toFixed(1)} t</strong></div><div><span>稳性裕度</span><strong>{stability.stability.toFixed(1)}%</strong></div><div><span>纵倾</span><strong>{stability.trim}</strong></div><div><span>主甲板载荷</span><strong>{stability.deckLoad.toFixed(1)} t</strong></div></div>
@@ -311,14 +469,16 @@ function PrintPlan() {
 
 function Shell({ children }: { children: ReactNode }) {
   const state = useSelector((root: RootState) => root.stowage);
+  const clearance = useSelector((root: RootState) => root.clearance);
+  const gate = clearanceGate(clearance, state.cargo);
   const stability = calculateStability(state.cargo);
   return <AppShell header={{ height: 62 }} navbar={{ width: 224, breakpoint: 'sm' }} padding={0}>
-    <AppShellHeader className="app-header"><Group h="100%" px="md" justify="space-between"><Group gap="sm"><ThemeIcon color="teal" variant="light"><IconShip size={19} /></ThemeIcon><div className="brand-copy"><strong>船舶配载校核台</strong><span>Stowage & Voyage Review</span></div></Group><Group gap="sm" visibleFrom="sm"><Badge variant="light" color="teal">海岳轮</Badge><Text size="xs" c="dimmed">V-2609-17 · 方案 V{state.planRevision}</Text><Badge color={state.locked ? 'teal' : 'orange'}>{state.locked ? '已锁定' : '审阅中'}</Badge></Group><ActionIcon variant="subtle" color="gray"><IconAnchor size={18} /></ActionIcon></Group></AppShellHeader>
+    <AppShellHeader className="app-header"><Group h="100%" px="md" justify="space-between"><Group gap="sm"><ThemeIcon color="teal" variant="light"><IconShip size={19} /></ThemeIcon><div className="brand-copy"><strong>船舶配载校核台</strong><span>Stowage & Voyage Review</span></div></Group><Group gap="sm" visibleFrom="sm"><Badge variant="light" color="teal">海岳轮</Badge><Text size="xs" c="dimmed">V-2609-17 · 方案 V{state.planRevision}</Text><Badge color={gate.open ? 'teal' : 'orange'} variant="light">靠港许可 {gate.open ? '全部有效' : `${gate.blocked.length} 项待处理`}</Badge><Badge color={state.locked ? 'teal' : 'orange'}>{state.locked ? '已锁定' : '审阅中'}</Badge></Group><ActionIcon variant="subtle" color="gray"><IconAnchor size={18} /></ActionIcon></Group></AppShellHeader>
     <AppShellNavbar p="xs" className="app-nav"><div className="voyage-card"><Text size="xs" c="dimmed">当前航次</Text><Text fw={800}>上海 → 温哥华</Text><Text size="xs" c="dimmed">经停釜山 · 10-02 离港</Text><Progress value={stability.stability} color={stability.stability > 70 ? 'teal' : 'orange'} size="sm" mt="sm" /><Text size="xs" mt={4}>稳性裕度 {stability.stability.toFixed(1)}%</Text></div>{nav.map((item) => <NavLink end={item.path === '/'} key={item.path} to={item.path}>{item.icon}<span>{item.label}</span></NavLink>)}<div className="nav-foot"><IconRoute size={16} /><Text size="xs">基线：方案 V4<br />草稿：{state.draftSavedAt} 自动保存</Text></div></AppShellNavbar>
     <AppShellMain>{children}</AppShellMain>
   </AppShell>;
 }
 
 export default function App() {
-  return <BrowserRouter><Shell><Routes><Route path="/" element={<Overview />} /><Route path="/stowage" element={<Stowage />} /><Route path="/compare" element={<Compare />} /><Route path="/print" element={<PrintPlan />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></Shell></BrowserRouter>;
+  return <BrowserRouter><Shell><Routes><Route path="/" element={<Overview />} /><Route path="/stowage" element={<Stowage />} /><Route path="/clearance" element={<Clearance />} /><Route path="/compare" element={<Compare />} /><Route path="/print" element={<PrintPlan />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></Shell></BrowserRouter>;
 }

@@ -1,5 +1,6 @@
 import { configureStore, createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import { stowageApi, type Cargo, type CargoType } from './api';
+import { clearanceReducer, CLEARANCE_STORAGE_KEY } from './clearance';
 
 export type StowageComment = {
   id: string;
@@ -84,12 +85,15 @@ const slice = createSlice({
 export const { selectCargo, moveCargo, updateLashing, addComment, acceptComment, rejectComment, acceptLimit, setViewMode, lockPlan } = slice.actions;
 
 export const store = configureStore({
-  reducer: { stowage: slice.reducer, [stowageApi.reducerPath]: stowageApi.reducer },
+  reducer: { stowage: slice.reducer, clearance: clearanceReducer, [stowageApi.reducerPath]: stowageApi.reducer },
   middleware: (getDefault) => getDefault().concat(stowageApi.middleware)
 });
 
 store.subscribe(() => {
-  if (typeof localStorage !== 'undefined') localStorage.setItem('yy62-stowage-plan', JSON.stringify(store.getState().stowage));
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('yy62-stowage-plan', JSON.stringify(store.getState().stowage));
+    localStorage.setItem(CLEARANCE_STORAGE_KEY, JSON.stringify(store.getState().clearance));
+  }
 });
 
 export type RootState = ReturnType<typeof store.getState>;
