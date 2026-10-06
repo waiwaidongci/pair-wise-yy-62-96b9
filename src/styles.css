@@ -111,6 +111,14 @@ body { margin: 0; min-width: 320px; background: #eef2f0; }
 .print-deck b { position: absolute; right: 5px; bottom: 5px; background: #c26b2a; color: white; border-radius: 3px; font-size: 8px; padding: 2px 4px; }
 .print-signatures { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin-top: 35px; padding-top: 17px; border-top: 1px solid var(--line); font-size: 11px; }
 
+/* === 靠港许可 === */
+.port-row { display: flex; align-items: center; gap: 8px; padding: 7px 9px; background: #f5f8f7; border: 1px solid var(--line); border-radius: 5px; }
+.tank-row { display: flex; align-items: center; gap: 8px; padding: 6px 9px; background: #f5f8f7; border: 1px solid var(--line); border-radius: 5px; }
+.window-row { display: flex; align-items: center; gap: 8px; padding: 7px 9px; background: #f5f8f7; border: 1px solid var(--line); border-radius: 5px; }
+.window-row.selected { background: #e2f0eb; border-color: #7fc4b3; }
+.window-row.alternative { background: #f3eafa; border-color: #c3aed6; }
+.permit-message { padding: 7px 9px; background: #fff7e7; border: 1px solid #ebcf9f; border-radius: 5px; color: #8e5617; }
+
 @media (max-width: 1200px) {
   .stowage-grid { grid-template-columns: 260px minmax(460px, 1fr); }
   .stowage-grid > :last-child { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
